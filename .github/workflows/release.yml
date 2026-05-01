@@ -1,0 +1,99 @@
+name: Release
+
+# Publishes the `githosted` Python SDK to PyPI on tag push.
+#
+# Source-of-truth note: the canonical source for this SDK lives
+# in the githosted monorepo under sdk/python/. The .github/workflows/
+# directory you're reading this file in is mirrored from
+# sdk/python/.github/workflows/ in that monorepo. Edits made directly
+# in this repo are overwritten on the next mirror sync — change the
+# monorepo copy instead.
+#
+# Trusted publishing
+# ------------------
+# Authentication uses PyPI's OIDC trusted publishing — no API token
+# stored in this repo. One-time PyPI setup:
+#   1. https://pypi.org/manage/account/publishing/
+#   2. Add a "pending" or existing publisher pointing at:
+#        owner       githosted-dev
+#        repository  python-sdk
+#        workflow    release.yml
+#        environment pypi   (optional but recommended)
+# That's it — no NPM_TOKEN-style secret to rotate.
+#
+# Trigger:
+#   git tag v0.1.0 && git push origin v0.1.0
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # OIDC trusted publishing needs id-token on the publish job.
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Read version
+        id: version
+        run: |
+          # Pull the version out of pyproject.toml. Sanity-check
+          # that it matches the tag — mismatches are the most
+          # common cause of "I tagged it but PyPI got the old
+          # version" surprises.
+          pkg_version="$(python -c 'import tomllib,sys;print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])')"
+          echo "version=$pkg_version" >> "$GITHUB_OUTPUT"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            tag_version="${GITHUB_REF_NAME#v}"
+            if [ "$pkg_version" != "$tag_version" ]; then
+              echo "::error::pyproject.toml version ($pkg_version) does not match tag ($tag_version). Bump pyproject.toml first."
+              exit 1
+            fi
+          fi
+
+      - name: Install build tooling
+        run: pip install --upgrade build
+
+      - name: Build wheel + sdist
+        run: python -m build
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/
+          retention-days: 7
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    # Optional but recommended: a `pypi` environment with a
+    # required reviewer turns publishes into a one-click approval
+    # flow. Configure under repo Settings → Environments.
+    environment:
+      name: pypi
+      url: https://pypi.org/p/githosted
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # Skip "already exists" errors if a re-run hits an
+          # already-published version. PyPI itself never lets a
+          # version be overwritten.
+          skip-existing: true
